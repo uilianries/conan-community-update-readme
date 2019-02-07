@@ -75,7 +75,8 @@ class Github(object):
         output = subprocess.check_output(["curl", "-s", "-X", "POST", "-H", "Content-Type: Application/json", "-H", f"Authorization: token {self.__token}", "-d", json.dumps(data), url]).decode()
         json_data = json.loads(output)
         if "errors" in json_data.keys():
-            if "already exists" in json_data["errors"][0]["message"]:
+            if "already exists" in json_data["errors"][0]["message"] or \
+                "No commits between" in json_data["errors"][0]["message"]:
                 self.logger.warning(json_data["errors"][0]["message"])
             else:
                 raise Exception(json_data["errors"][0]["message"])
@@ -105,9 +106,9 @@ class ReadmeGenerator(object):
             for stable, testing in pair_branches.items():
                 self._checkout(testing)
                 self._apply_templates()
-                self._commit()
-                self._push(testing)
-                self.github.create_pull_request(full_repo_name=full_repo_name, base=stable, head=testing)
+                if self._commit():
+                    self._push(testing)
+                    self.github.create_pull_request(full_repo_name=full_repo_name, base=stable, head=testing)
 
     def _checkout(self, branch):
         self.logger.info(f"Checkout to branch {branch}")
@@ -121,9 +122,13 @@ class ReadmeGenerator(object):
             output = subprocess.check_output(["git", "commit", "-a", "-s", "-m", "Apply Conan Readme Generator [skip ci]"]).decode()
             if "Apply Conan Readme Generator" not in output:
                 raise Exception("Could not commit changes")
+            return False
         except subprocess.CalledProcessError as error:
-            if "nothing to commit, working tree clean" not in str(error.output):
+            if "Your branch is up to date" in str(error.output):
+                return False
+            elif "nothing to commit, working tree clean" not in str(error.output):
                 raise Exception(f"Could not commit changes: {error.output}")
+
 
     def _push(self, branch):
         try:
@@ -133,9 +138,12 @@ class ReadmeGenerator(object):
                 raise Exception(f"Could not push changes: {error.output}")
 
     def _apply_templates(self):
-        subprocess.check_call(["conan-readme-generator", "conan/stable", self._readme_template, self._license_template])
-        if os.path.isfile("LICENSE"):
-            shutil.move("LICENSE.md", "LICENSE")
+        try:
+            subprocess.check_call(["conan-readme-generator", "conan/stable", self._readme_template, self._license_template])
+            if os.path.isfile("LICENSE"):
+                shutil.move("LICENSE.md", "LICENSE")
+        except subprocess.CalledProcessError as error:
+            self.logger.error(str(error.output))
 
     def _get_pair_branches(self, branches):
         pattern = re.compile(r"testing\/(.*)")
@@ -159,6 +167,8 @@ def main():
     generator = ReadmeGenerator(logger, github)
     repos = github.get_repositories()
     for repo in repos:
+        if not repo["name"].startswith("conan-"):
+            continue
         full_name = repo["full_name"]
         logger.info(f"Cloning {full_name} ...")
         repo_path = github.clone_repo(full_name)
